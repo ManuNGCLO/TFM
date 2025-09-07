@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+
+# Entornos locales
+.venv/
+.env
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Datos locales / generados
+data/history_nl2cypher.jsonl
+results/
+explorar_grafo.html
