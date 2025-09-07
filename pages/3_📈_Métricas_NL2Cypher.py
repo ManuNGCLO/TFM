@@ -54,6 +54,7 @@ if os.path.exists(LOG_PATH):
             try:
                 rows.append(json.loads(line))
             except Exception:
+                # línea corrupta → la ignoramos
                 pass
 
 if not rows:
@@ -64,8 +65,12 @@ else:
 
 # Tipos y saneo básico
 if not df.empty:
-    if "ts" in df.columns:
-        df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
+    # Asegura 'ts' y normaliza: parsea, pasa a UTC y quita timezone (naive)
+    if "ts" not in df.columns:
+        df["ts"] = pd.NaT
+    df["ts"] = pd.to_datetime(df["ts"], errors="coerce", utc=True).dt.tz_localize(None)
+
+    # Coerción de numéricos
     for col in ("rows", "ms"):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -97,16 +102,20 @@ if not df.empty:
     if evtype != "Todos":
         f = f[f["type"] == evtype]
 
-    # Normalización para groupby/pivots
+    # Normalización para groupby/pivots (evita NaN en columnas clave)
+    if "engine" not in f.columns:
+        f["engine"] = "(desconocido)"
+    if "model" not in f.columns:
+        f["model"] = "(reglas)"
     f["engine"] = f["engine"].fillna("(desconocido)")
     f["model"]  = f["model"].fillna("(reglas)")
 
     # ---------- KPIs básicos ----------
     c1, c2, c3, c4 = st.columns(4)
     total   = len(f)
-    ok      = int((f["status"] == "ok").sum())
-    fallback= int((f["status"] == "fallback").sum())
-    err     = int((f["status"] == "error").sum())
+    ok      = int((f.get("status", pd.Series()) == "ok").sum())
+    fallback= int((f.get("status", pd.Series()) == "fallback").sum())
+    err     = int((f.get("status", pd.Series()) == "error").sum())
 
     with c1: st.metric("Eventos", total)
     with c2: st.metric("OK", ok)
@@ -120,17 +129,23 @@ if not df.empty:
     if f.empty:
         st.info("No hay eventos en el rango/filtrado seleccionado.")
     else:
+        # Garantiza columnas necesarias
+        for c in ["type", "status"]:
+            if c not in f.columns:
+                f[c] = "(desconocido)"
         grp = f.groupby(["engine", "type", "status"]).size().reset_index(name="n")
         pivot = grp.pivot_table(index=["engine", "type"], columns="status", values="n", fill_value=0).reset_index()
         for col in ("ok", "error", "fallback"):
             if col not in pivot.columns:
                 pivot[col] = 0
-        st.dataframe(pivot[["engine", "type", "error", "ok", "fallback"]],
-                     use_container_width=True, height=220)
+        st.dataframe(
+            pivot[["engine", "type", "error", "ok", "fallback"]],
+            use_container_width=True, height=220
+        )
 
     # ---------- Latencia y filas (solo ejecuciones OK) ----------
     st.subheader("Latencia y filas (solo ejecuciones OK)")
-    fx = f[(f["type"] == "execute") & (f["status"] == "ok")].copy()
+    fx = f[(f.get("type") == "execute") & (f.get("status") == "ok")].copy()
     if fx.empty:
         st.info("No hay ejecuciones OK en el rango/filtrado activo.")
     else:
@@ -151,7 +166,7 @@ if not df.empty:
 
     with col1:
         tb_fallback = (
-            f[f["status"] == "fallback"]
+            f[f.get("status") == "fallback"]
             .groupby(["question", "engine", "model"])
             .size()
             .reset_index(name="veces")
@@ -166,7 +181,7 @@ if not df.empty:
 
     with col2:
         tb_error = (
-            f[f["status"] == "error"]
+            f[f.get("status") == "error"]
             .groupby(["error", "engine", "model"])
             .size()
             .reset_index(name="veces")
@@ -191,10 +206,12 @@ if not df.empty:
 
     # ---------- Export ----------
     csv = f.to_csv(index=False).encode("utf-8")
-    st.download_button("⬇️ Descargar CSV filtrado",
-                       data=csv,
-                       file_name="nl2cypher_metrics.csv",
-                       mime="text/csv")
+    st.download_button(
+        "⬇️ Descargar CSV filtrado",
+        data=csv,
+        file_name="nl2cypher_metrics.csv",
+        mime="text/csv"
+    )
 
 else:
     st.info("Cuando exista histórico, verás aquí KPIs y tablas online.")
@@ -231,13 +248,15 @@ if results_path.exists():
         else:
             # cálculo rápido si no existe summary.csv
             def _q95(s):
-                try: return float(pd.Series(s).quantile(0.95))
-                except: return None
+                try:
+                    return float(pd.Series(s).quantile(0.95))
+                except Exception:
+                    return None
             dfs = dfr.groupby("engine", dropna=False).agg(
                 n=("status","count"),
                 ok=("status", lambda s: int((s=="ok").sum())),
                 error=("status", lambda s: int((s=="error").sum())),
-                fallback=("fallback_used", lambda s: int(s.sum())),
+                fallback=("fallback_used", lambda s: int(pd.Series(s).fillna(False).sum())),
                 f1_avg=("f1","mean"),
                 f1_median=("f1","median"),
                 ms_p50=("ms", lambda s: float(pd.Series(s).median(skipna=True))),
