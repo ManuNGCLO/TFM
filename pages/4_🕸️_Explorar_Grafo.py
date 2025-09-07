@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 
 import os
-import io
+import tempfile
 import pandas as pd
 import streamlit as st
 
@@ -93,10 +93,16 @@ with c4:
 
 c5, c6, c7 = st.columns([1, 1, 2], gap="medium")
 explorar = c5.button("Explorar", type="primary")
-reset = c6.button("Reset")
+do_reset = c6.button("Reset")
 
-if reset:
-    st.experimental_rerun()
+# --- Reset compatible con versiones nuevas de Streamlit ---
+if do_reset:
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
+    st.session_state.clear()
+    st.rerun()
 
 # ------------------------------------------------------------
 # Cypher helpers
@@ -208,12 +214,13 @@ def draw_with_pyvis(df: pd.DataFrame) -> Optional[str]:
         edge_color = EDGE_COLOR.get(r_type, "#a1a1aa")
         net.add_edge(na, nb, label=r_type, color=edge_color, title=r_type)
 
-    # Guardar y embeber
-    html_path = os.path.join(".", "explorar_grafo.html")
-    net.save_graph(html_path)
-    with open(html_path, "r", encoding="utf-8") as f:
+    # Guardar en un temporal y embeber
+    with tempfile.NamedTemporaryFile("w+", suffix=".html", delete=False) as tmp:
+        tmp_path = tmp.name
+    net.save_graph(tmp_path)
+    with open(tmp_path, "r", encoding="utf-8") as f:
         components.html(f.read(), height=760, scrolling=True)
-    return html_path
+    return tmp_path
 
 # ------------------------------------------------------------
 # Acción principal
