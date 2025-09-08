@@ -1,13 +1,17 @@
-# text_to_cypher.py
+# utils/text_to_cypher.py
 # -*- coding: utf-8 -*-
 """
 Generador NL → Cypher (TFM R46)
 - Intents: MENCIONA / TRATA_SOBRE / DEROGA / MODIFICA / ARTÍCULOS DE
 - Sinónimos: LOPD→LO 15/1999, LOPDGDD→LO 3/2018, RGPD/GDPR→Reglamento UE 2016/679, AEPD, etc.
+- API:
+    - gen(q) -> str          (retrocompatible)
+    - gen_ex(q, mode) -> (cypher, engine)   [para mostrar el motor en UI]
 """
 from __future__ import annotations
 import re
 import unicodedata
+from typing import Tuple
 
 # ----------------------- Normalización y utilidades --------------------------
 
@@ -83,9 +87,9 @@ def _doc_term_from_question(q: str) -> str:
         return "memoria 2024"
     return ""
 
-# --------------------------- Generación de Cypher ----------------------------
+# --------------------------- Generación de Cypher (reglas) -------------------
 
-def gen(q: str) -> str:
+def _rules(q: str) -> str:
     qn = _norm(q)
     term = _doc_term_from_question(q)
     id_like = term.replace(" ", "-")
@@ -237,3 +241,17 @@ def gen(q: str) -> str:
     // - '¿Qué artículos contiene LO 3/2018?'
     RETURN 'Pregunta no reconocida' AS aviso
     """.strip()
+
+# --------------------------- API pública ---------------------
+
+def gen(q: str) -> str:
+    """Retrocompatible: devuelve solo el Cypher (modo reglas)."""
+    return _rules(q)
+
+def gen_ex(q: str, mode: str = "auto") -> Tuple[str, str]:
+    """
+    Devuelve (cypher, engine). 'mode' se mantiene por compatibilidad futura.
+    En esta implementación siempre usamos reglas → engine='rules'.
+    """
+    cy = _rules(q)
+    return cy, "rules"

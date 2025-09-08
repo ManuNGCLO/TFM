@@ -205,7 +205,8 @@ RETURN d.id AS id, d.titulo AS titulo, n AS num_articulos
 ORDER BY num_articulos DESC, titulo
 LIMIT $lim
 """
-    return run_cypher(q, lim=limit).to_data_frame()
+    # 🔧 FIX: pasar el parámetro como dict en 'parameters'
+    return run_cypher(q, parameters={"lim": limit}).to_data_frame()
 
 colA, colB = st.columns([1, 3])
 with colA:

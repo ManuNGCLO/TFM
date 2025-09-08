@@ -1,9 +1,20 @@
-# app/graph_client.py
+# utils/graph_client.py
 # -*- coding: utf-8 -*-
-from __future__ import annotations
+"""
+Cliente Neo4j para TFM R46 — SIN pasos manuales en Aura
+Mejoras clave:
+- Auto-esquema idempotente: constraints + índices + full-text (doc/tema/artículo)
+- Detección de TLS por esquema (bolt+s / bolt+ssc / neo4j+s / neo4j+ssc)
+- Conexión cacheada (Streamlit) con smoke-test y reconexión automática
+- API práctica: run(), run_cypher(), run_data(), evaluate(), get_graph()
+- Tolerante a Neo4j 4.x/5.x para full-text (DDL / procedimiento)
 
+Lee credenciales de st.secrets o del entorno:
+  NEO4J_URI, NEO4J_USER, NEO4J_PASS | NEO4J_PASSWORD
+"""
+from __future__ import annotations
 import os
-from typing import Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
 from py2neo import Graph
@@ -14,14 +25,11 @@ except Exception:  # compat fallback
     class BrokenWireError(Exception): ...
 
 # -------------------------------------------------------------------
-# Credenciales y conexión
+# Credenciales y TLS
 # -------------------------------------------------------------------
 
 def _read_creds() -> Tuple[str, str, str]:
-    """
-    Lee credenciales desde st.secrets o variables de entorno.
-    Soporta NEO4J_PASS y NEO4J_PASSWORD como alias.
-    """
+    """Lee credenciales desde st.secrets o variables de entorno."""
     secrets = getattr(st, "secrets", {})
     uri = secrets.get("NEO4J_URI") or os.getenv("NEO4J_URI", "")
     user = secrets.get("NEO4J_USER") or os.getenv("NEO4J_USER", "")
@@ -33,13 +41,9 @@ def _read_creds() -> Tuple[str, str, str]:
     )
     return uri, user, password
 
+
 def _parse_security(uri: str) -> Tuple[bool, bool]:
-    """
-    Devuelve (secure, verify) según el esquema:
-      - *+s*  : TLS (cert. válido)      -> secure=True, verify=True
-      - *+ssc*: TLS (self-signed cert.) -> secure=True, verify=False
-    Soporta: bolt+s, bolt+ssc, neo4j+s, neo4j+ssc
-    """
+    """Devuelve (secure, verify) según el esquema (+s = TLS, +ssc = sin verificación)."""
     u = (uri or "").lower()
     secure = "+s" in u
     verify = True
@@ -48,42 +52,43 @@ def _parse_security(uri: str) -> Tuple[bool, bool]:
     return secure, verify
 
 # -------------------------------------------------------------------
-# Esquema automático (idempotente)
+# Esquema automático (constraints, índices y full-text)
 # -------------------------------------------------------------------
 
+def _safe_run(g: Graph, query: str) -> None:
+    try:
+        g.run(query).consume()
+    except Exception:
+        # ignora "ya existe" o sintaxis no soportada en ciertas versiones
+        pass
+
+
 def _ensure_schema(g: Graph) -> None:
-    """
-    Asegura constraints, índices y full-text necesarios. Idempotente.
-    - Compatibilidad Neo4j 5.x (DDL) y 4.x (procedimiento full-text).
-    - Silencioso si el índice ya existe o el comando no está disponible.
-    """
-    stmts = [
-        # Constraint & índices básicos
+    """Crea constraints/índices/full-text si no existen (idempotente)."""
+    base = [
         "CREATE CONSTRAINT doc_id IF NOT EXISTS FOR (d:Documento) REQUIRE d.id IS UNIQUE",
+        "CREATE CONSTRAINT art_id IF NOT EXISTS FOR (a:Articulo)  REQUIRE a.id IS UNIQUE",
+        "CREATE CONSTRAINT tema_nombre IF NOT EXISTS FOR (t:Tema) REQUIRE t.nombre IS UNIQUE",
         "CREATE INDEX IF NOT EXISTS FOR (d:Documento) ON (d.titulo)",
         "CREATE INDEX IF NOT EXISTS FOR (t:Tema)       ON (t.norm)",
         "CREATE INDEX IF NOT EXISTS FOR (e:Entidad)    ON (e.norm)",
         "CREATE INDEX IF NOT EXISTS FOR (a:Articulo)   ON (a.numero)",
     ]
+    for q in base:
+        _safe_run(g, q)
 
-    for q in stmts:
-        try:
-            g.run(q)
-        except Exception:
-            # Ignora "already exists" o sintaxis no soportada por la versión
-            pass
+    # Full-text (DDL Neo4j 5.x)
+    _safe_run(g, "CREATE FULLTEXT INDEX doc_fulltext  IF NOT EXISTS FOR (d:Documento) ON EACH [d.titulo, d.id, d.alias]")
+    _safe_run(g, "CREATE FULLTEXT INDEX tema_fulltext IF NOT EXISTS FOR (t:Tema)       ON EACH [t.nombre, t.alias]")
+    _safe_run(g, "CREATE FULLTEXT INDEX ft_articulos  IF NOT EXISTS FOR (a:Articulo)   ON EACH [a.titulo, a.texto]")
 
-    # Full-text para Articulos (titulo, texto)
-    # 1) Intento DDL (Neo4j 5.x):
+    # Si tu instancia no soporta DDL FT (Neo4j 4.x), cae al procedimiento
     try:
-        g.run("CREATE FULLTEXT INDEX ft_articulos IF NOT EXISTS FOR (a:Articulo) ON EACH [a.titulo, a.texto]")
+        g.run("CALL db.index.fulltext.list()").data()
     except Exception:
-        # 2) Intento procedimiento (Neo4j 4.x):
-        try:
-            g.run("CALL db.index.fulltext.createNodeIndex('ft_articulos',['Articulo'],['titulo','texto'])")
-        except Exception:
-            # Si tampoco existe el procedimiento (edición muy antigua / sin plugin), lo omitimos.
-            pass
+        _safe_run(g, "CALL db.index.fulltext.createNodeIndex('doc_fulltext',['Documento'],['titulo','id','alias'])")
+        _safe_run(g, "CALL db.index.fulltext.createNodeIndex('tema_fulltext',['Tema'],['nombre','alias'])")
+        _safe_run(g, "CALL db.index.fulltext.createNodeIndex('ft_articulos',['Articulo'],['titulo','texto'])")
 
 # -------------------------------------------------------------------
 # Conexión cacheada + smoke test
@@ -96,10 +101,8 @@ def _connect(uri: str, user: str, password: str) -> Graph:
         st.stop()
     secure, verify = _parse_security(uri)
     g = Graph(uri, auth=(user, password), secure=secure, verify=verify)
-    # Smoke test de conexión
-    g.run("RETURN 1").evaluate()
-    # Asegura el esquema al momento de conectar (idempotente)
-    _ensure_schema(g)
+    g.run("RETURN 1").evaluate()       # smoke test
+    _ensure_schema(g)                  # crea esquema al primer uso
     return g
 
 _cached_graph: Optional[Graph] = None
@@ -125,15 +128,24 @@ def get_graph(force_new: bool = False) -> Graph:
         _cached_graph = _new_graph()
         return _cached_graph
 
-def run_cypher(query: str, **params):
-    """Ejecuta Cypher con reconexión automática."""
+
+def run(query: str, parameters: Optional[Dict[str, Any]] = None):
+    """Ejecuta Cypher con reconexión automática. Retorna Cursor de py2neo."""
     g = get_graph()
     try:
-        return g.run(query, **params)
+        return g.run(query, parameters=parameters or {})
     except (ConnectionBroken, BrokenWireError):
         g = get_graph(force_new=True)
-        return g.run(query, **params)
+        return g.run(query, parameters=parameters or {})
 
-def evaluate(query: str, **params):
-    """Como run().evaluate() pero con reconexión automática."""
-    return run_cypher(query, **params).evaluate()
+# ✅ Alias retro-compatible para tu página: mantiene import run_cypher
+def run_cypher(query: str, parameters: Optional[Dict[str, Any]] = None):
+    return run(query, parameters)
+
+def run_data(query: str, parameters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """Ejecuta Cypher y devuelve data() (lista de dicts)."""
+    return run(query, parameters).data()
+
+def evaluate(query: str, parameters: Optional[Dict[str, Any]] = None):
+    """Ejecuta Cypher y devuelve evaluate()."""
+    return run(query, parameters).evaluate()

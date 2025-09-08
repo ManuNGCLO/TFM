@@ -160,7 +160,9 @@ def fetch_edges(modo: str, val: str, depth: int, limit: int, allowed: List[str])
     modo: "doc" | "ent"
     """
     q = cypher_edges_by_document(depth) if modo == "doc" else cypher_edges_by_name(depth)
-    cur = run_cypher(q, val=val, allowed=allowed, limit=limit)
+    # ❗️IMPORTANTE: usar parameters={} para compatibilidad con clientes que no aceptan kwargs
+    params = {"val": val, "allowed": allowed or RELS, "limit": int(limit)}
+    cur = run_cypher(q, parameters=params)
     return cur.to_data_frame()
 
 # ------------------------------------------------------------
@@ -186,11 +188,9 @@ def draw_with_pyvis(df: pd.DataFrame) -> Optional[str]:
 
     seen: set[str] = set()
     for _, row in df.iterrows():
-        a_label = str(row["a_label"])
-        a_key   = str(row["a_key"])
+        a_label = str(row["a_label"]); a_key = str(row["a_key"])
         r_type  = str(row["r_type"])
-        b_label = str(row["b_label"])
-        b_key   = str(row["b_key"])
+        b_label = str(row["b_label"]); b_key = str(row["b_key"])
 
         na = node_id(a_label, a_key)
         nb = node_id(b_label, b_key)

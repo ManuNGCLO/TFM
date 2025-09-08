@@ -17,3 +17,4 @@ st.page_link("pages/2_🩺_Diagnóstico_Grafo.py",
 st.page_link("pages/3_📈_Métricas_NL2Cypher.py", label="📊 Métricas")
 
 st.page_link("pages/4_🕸️_Explorar_Grafo.py", label="🕸️ Grafo")
+st.page_link("pages/5_🧠_Respuesta_Explicada.py", label="Explicada")
