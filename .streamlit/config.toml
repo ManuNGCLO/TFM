@@ -3,4 +3,4 @@ headless = true
 fileWatcherType = "auto"
 
 [theme]
-base = "dark"  # o "light"
+base = "light"  # o "dark"
