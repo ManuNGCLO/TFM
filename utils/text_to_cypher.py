@@ -1,8 +1,8 @@
 # utils/text_to_cypher.py
 # -*- coding: utf-8 -*-
 """
-TFM R46 – Generador NL/Text → Cypher (versión final para Neo4j Aura)
---------------------------------------------------------------------
+TFM R46 – Generador NL/Text → Cypher (versión final mejorada para Neo4j Aura)
+-----------------------------------------------------------------------------
 
 ✔ Crea relaciones semánticas automáticamente:
   - TRATA_SOBRE → :Tema
@@ -11,7 +11,7 @@ TFM R46 – Generador NL/Text → Cypher (versión final para Neo4j Aura)
   - MENCIONA → :Entidad (AEPD, RGPD, GDPR, Reglamento UE 2016/679)
 ✔ Compatible con Neo4j Aura (una sola query por transacción)
 ✔ Evita reuso de alias (t0, x0, e0, e1)
-✔ Incluye motor NL2Cypher por reglas
+✔ Incluye motor NL2Cypher por reglas + mejoras de precisión semántica
 """
 
 from __future__ import annotations
@@ -114,7 +114,7 @@ def _find_doc_refs_in_text(text: str) -> Dict[str, List[str]]:
     for m in _PAT_NUMSLASH.finditer(text):
         n, y = m.group(1), m.group(2)
         if f"{n}/{y}" != "2016/679":
-            refs["generic"].append(f"{n}/{y}")
+            refs["generic"].append(f"{n} {y}")
     return refs
 
 def _detect_actions(text: str) -> Dict[str, bool]:
@@ -169,8 +169,8 @@ def _infer_and_build(article_text: str, doc_id: str) -> str:
     # 3️⃣ REFERENCIAS A OTROS DOCUMENTOS
     doc_targets: List[str] = refs["boe"] + refs["celex"] + refs["lo"] + refs["rd"] + refs["ley"]
     for g in refs["generic"]:
-        if g != "2016/679":
-            doc_targets.append(g.replace("/", " "))
+        if g != "2016 679":
+            doc_targets.append(g)
 
     if actions["menciona"] and not doc_targets:
         if "lo 3 2018" in tnorm: doc_targets.append("lo 3 2018")
@@ -188,7 +188,6 @@ def _infer_and_build(article_text: str, doc_id: str) -> str:
         else:
             cy.append(f"MERGE (d)-[:MENCIONA_DOC]->({alias_dst})")
 
-    # 4️⃣ CIERRE (solo una sentencia)
     cy.append("RETURN 'Relaciones generadas en Neo4j Aura' AS status;")
 
     result = "\n".join(cy)
@@ -199,7 +198,7 @@ def _infer_and_build(article_text: str, doc_id: str) -> str:
 
 
 # ==============================================================
-# 🔎 Motor NL → Cypher (modo lectura)
+# 🔎 Motor NL → Cypher (modo lectura mejorado)
 # ==============================================================
 
 def _rules(q: str) -> str:
@@ -207,11 +206,46 @@ def _rules(q: str) -> str:
     term = _doc_term_from_question(q)
     id_like = term.replace(" ", "-")
 
+    # --- NUEVOS PATRONES SEMÁNTICOS ---
+    if "rgpd" in qn or "gdpr" in qn or "reglamento 2016 679" in qn:
+        return """
+MATCH (d:Documento)-[:MENCIONA]->(e:Entidad)
+WHERE toLower(e.nombre) CONTAINS 'rgpd' OR toLower(coalesce(e.norm,e.nombre)) CONTAINS '2016/679'
+RETURN DISTINCT d.id AS id, d.titulo AS titulo
+ORDER BY titulo
+""".strip()
+
+    if "aepd" in qn or "agencia espanola de proteccion de datos" in qn:
+        return """
+MATCH (d:Documento)-[:MENCIONA]->(e:Entidad)
+WHERE toLower(e.nombre) CONTAINS 'aepd'
+RETURN DISTINCT d.id AS id, d.titulo AS titulo
+ORDER BY titulo
+""".strip()
+
+    if "vigent" in qn or "actual" in qn:
+        return """
+MATCH (d:Documento)
+WHERE coalesce(d.vigente,true) = true
+RETURN DISTINCT d.id AS id, d.titulo AS titulo
+ORDER BY titulo
+""".strip()
+
+    if "proteccion de datos" in qn or "protección de datos" in qn:
+        return """
+MATCH (d:Documento)-[:TRATA_SOBRE]->(t:Tema)
+WHERE toLower(t.nombre) CONTAINS 'proteccion' AND toLower(t.nombre) CONTAINS 'datos'
+RETURN DISTINCT d.id AS id, d.titulo AS titulo
+ORDER BY titulo
+""".strip()
+
+    # --- Reglas estándar originales (con mejoras) ---
     if _has_root(q, "mencion"):
         return f"""
-MATCH (d:Documento)-[:MENCIONA_DOC]->(x:Documento)
-WHERE toLower(x.id) CONTAINS '{id_like}' OR toLower(x.titulo) CONTAINS '{term}'
-RETURN DISTINCT d.id AS documento, d.titulo AS titulo
+MATCH (d:Documento)-[:MENCIONA_DOC|MENCIONA]->(x)
+WHERE toLower(x.id) CONTAINS '{id_like}'
+   OR toLower(coalesce(x.titulo, x.nombre)) CONTAINS '{term}'
+RETURN DISTINCT d.id AS id, d.titulo AS titulo
 ORDER BY titulo
 """.strip()
 
